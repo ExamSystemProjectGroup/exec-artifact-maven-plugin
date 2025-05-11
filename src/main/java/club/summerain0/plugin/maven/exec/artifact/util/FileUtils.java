@@ -1,6 +1,7 @@
 package club.summerain0.plugin.maven.exec.artifact.util;
 
 import club.summerain0.plugin.maven.exec.artifact.bean.SQLToken;
+import club.summerain0.plugin.maven.exec.artifact.constants.SQLTokenType;
 import org.apache.maven.plugin.MojoFailureException;
 
 import java.io.BufferedWriter;
@@ -47,6 +48,13 @@ public class FileUtils {
                     if (sqlToken.getExecuteComment() != null) {
                         writer.write(sqlToken.getExecuteComment());
                         writer.newLine();
+                    }
+                    if (sqlToken.getType() == SQLTokenType.COMMENT) {
+                        // 不输出执行失败的日志注释
+                        String pattern = "/\\*执行失败(.*\n)*\\*/";
+                        if (sqlToken.getContent().matches(pattern)) {
+                            continue;
+                        }
                     }
                     // 用newLine单行注释会多出一行也不知道为啥
                     writer.write(sqlToken.getContent() + "\n");

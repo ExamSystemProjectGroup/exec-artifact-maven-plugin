@@ -2,10 +2,12 @@ package club.summerain0.plugin.maven.exec.artifact.mojo;
 
 import club.summerain0.plugin.maven.exec.artifact.bean.SQLToken;
 import club.summerain0.plugin.maven.exec.artifact.config.ExecuteConfig;
+import club.summerain0.plugin.maven.exec.artifact.config.MySQLConfig;
 import club.summerain0.plugin.maven.exec.artifact.constants.DBType;
 import club.summerain0.plugin.maven.exec.artifact.constants.ExecuteArtifactPolicyConstants;
 import club.summerain0.plugin.maven.exec.artifact.constants.SQLTokenType;
 import club.summerain0.plugin.maven.exec.artifact.parser.SQLParser;
+import club.summerain0.plugin.maven.exec.artifact.support.MySQLSupport;
 import club.summerain0.plugin.maven.exec.artifact.util.FileUtils;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -15,6 +17,8 @@ import org.apache.maven.plugins.annotations.Parameter;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -24,6 +28,7 @@ import java.util.Objects;
 @Mojo(name = "execute")
 public class ExecuteArtifactMojo extends AbstractMojo {
     private static final String EXECUTED_COMMIT = "/*语句已执行*/";
+    private static final String EXECUTED_FAILURE_COMMIT = "/*执行失败\n%s\n*/";
 
     /**
      * 交付物基准目录
@@ -36,6 +41,12 @@ public class ExecuteArtifactMojo extends AbstractMojo {
      */
     @Parameter
     private ExecuteConfig executeConfig;
+
+    /**
+     * MySQL配置
+     */
+    @Parameter
+    private MySQLConfig mySQLConfig;
 
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
@@ -94,11 +105,30 @@ public class ExecuteArtifactMojo extends AbstractMojo {
      * @param file SQL交付物目录
      */
     private void executeSQLArtifact(File file) throws MojoExecutionException, MojoFailureException {
+        MySQLSupport mySQLSupport;
+        try {
+            mySQLSupport = MySQLSupport.getConnection(
+                    mySQLConfig.getUrl(),
+                    mySQLConfig.getUsername(),
+                    mySQLConfig.getPassword()
+            );
+        } catch (Exception e) {
+            throw new MojoFailureException("获取MySQL连接失败", e);
+        }
+
         File[] files = file.listFiles();
         if (files == null) return;
 
+        // 排序，含有ddl的放在最前面
+        List<File> fileList = Arrays.stream(files).sorted((o1, o2) -> {
+            boolean ddl1 = o1.getName().toLowerCase().contains("ddl");
+            boolean ddl2 = o2.getName().toLowerCase().contains("ddl");
+            if (ddl1 == ddl2) return 0;
+            return ddl1 ? -1 : 1;
+        }).toList();
+
         // 遍历执行SQL交付物
-        for (File sqlFile : files) {
+        for (File sqlFile : fileList) {
             if (!sqlFile.isFile()) return;
 
             getLog().info(String.format("-- 开始处理%s", sqlFile.getAbsolutePath()));
@@ -116,7 +146,7 @@ public class ExecuteArtifactMojo extends AbstractMojo {
             try {
                 sqlTokenList = SQLParser.parseSQL(fileContent);
             } catch (Exception e) {
-                throw new RuntimeException(e);
+                throw new MojoFailureException(e);
             }
 
             // 执行SQL
@@ -132,7 +162,15 @@ public class ExecuteArtifactMojo extends AbstractMojo {
 
                     // 如果遇到语句，则执行
                     if (Objects.equals(sqlToken.getType(), SQLTokenType.SQL)) {
-                        sqlToken.setExecuteComment(EXECUTED_COMMIT);
+                        try {
+                            mySQLSupport.execute(sqlToken.getContent());
+                            sqlToken.setExecuteComment(EXECUTED_COMMIT);
+                        } catch (SQLException e) {
+                            sqlToken.setExecuteComment(
+                                    String.format(EXECUTED_FAILURE_COMMIT, e.getMessage())
+                            );
+                            break;
+                        }
                     }
                 } else { // 当前需要跳过
                     if (Objects.equals(sqlToken.getType(), SQLTokenType.SQL)) {
@@ -147,5 +185,8 @@ public class ExecuteArtifactMojo extends AbstractMojo {
 
             getLog().info(String.format("-- 结束处理%s", sqlFile.getAbsolutePath()));
         }
+
+        // 关闭链接
+        mySQLSupport.close();
     }
 }
